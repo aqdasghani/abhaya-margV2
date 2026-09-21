@@ -4,6 +4,23 @@ import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  server: {
+    proxy: {
+      '/gov-api/incois': {
+        target: 'https://erddap.incois.gov.in',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/gov-api\/incois/, ''),
+        secure: false,
+      },
+      '/gov-api/datagov': {
+        target: 'https://api.data.gov.in',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/gov-api\/datagov/, ''),
+        secure: false,
+      },
+    },
+  },
+
   build: {
     rollupOptions: {
       output: {

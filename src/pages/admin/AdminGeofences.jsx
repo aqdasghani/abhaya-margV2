@@ -7,7 +7,7 @@ import {
   deleteGeofence,
   syncGovernmentGeofences,
 } from '../../firebase/geofenceService'
-import { fetchGovernmentRiskZones } from '../../services/govGeofenceService'
+import { fetchOfficialGovernmentGeofences, GOV_API_PROVIDERS } from '../../services/govGeofenceService'
 
 const emptyForm = { name: '', description: '', latitude: '', longitude: '', radius: '', riskLevel: 'LOW' }
 
@@ -20,6 +20,11 @@ function AdminGeofences() {
   const [syncResult, setSyncResult] = useState(null)
   const [error, setError] = useState('')
   const [filter, setFilter] = useState('ALL') // ALL | GOV | MANUAL
+
+  // Government API selection state
+  const [selectedProvider, setSelectedProvider] = useState('INCOIS')
+  const [govApiKey, setGovApiKey] = useState(() => localStorage.getItem('data_gov_api_key') || '')
+  const [customGovUrl, setCustomGovUrl] = useState('')
 
   useEffect(() => {
     const unsub = subscribeToGeofences(setGeofences)
@@ -88,14 +93,29 @@ function AdminGeofences() {
     setSyncing(true)
     setSyncResult(null)
     setError('')
+
     try {
-      const { zones, source } = await fetchGovernmentRiskZones()
+      if (govApiKey) {
+        localStorage.setItem('data_gov_api_key', govApiKey)
+      }
+
+      const { provider, agency, zones } = await fetchOfficialGovernmentGeofences({
+        providerId: selectedProvider,
+        apiKey: govApiKey || import.meta.env?.VITE_DATA_GOV_IN_API_KEY,
+        customUrl: customGovUrl || import.meta.env?.VITE_GOV_GEOFENCE_API_URL,
+      })
+
+      if (!zones || zones.length === 0) {
+        throw new Error(`The official ${provider} API returned 0 matching records for this territory.`)
+      }
+
       const result = await syncGovernmentGeofences(zones)
-      setSyncResult({ ...result, source })
+      setSyncResult({ ...result, provider, agency, count: zones.length })
     } catch (err) {
-      setError(`Failed to sync government hazard zones: ${err.message}`)
+      setError(`Failed to fetch and create government geofences: ${err.message}`)
+    } finally {
+      setSyncing(false)
     }
-    setSyncing(false)
   }
 
   const riskBadge = {
@@ -113,39 +133,109 @@ function AdminGeofences() {
   const govCount = geofences.filter((g) => g.source === 'GOVERNMENT_API').length
   const manualCount = geofences.length - govCount
 
+  const currentProviderConfig = GOV_API_PROVIDERS.find((p) => p.id === selectedProvider)
+
   return (
     <div className="max-w-6xl mx-auto space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-800">Safety Geofences</h1>
           <p className="text-gray-500 text-sm">
-            Configure safety perimeters from official government databases and custom administrative zones.
+            Fetch real-time safety zones directly from official Indian Government APIs or add custom perimeters manually.
           </p>
         </div>
       </div>
 
-      {/* Government Database / API Integration Panel */}
-      <div className="bg-gradient-to-r from-blue-900 to-indigo-900 rounded-2xl p-6 text-white shadow-lg">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+      {/* Official Indian Government APIs Fetch & Auto-Create Console */}
+      <div className="bg-gradient-to-r from-blue-900 to-indigo-900 rounded-2xl p-6 text-white shadow-lg space-y-4">
+        <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
           <div className="space-y-1">
             <div className="flex items-center gap-2">
               <span className="text-xs uppercase tracking-wider font-semibold px-2 py-0.5 rounded bg-blue-500/30 text-blue-200 border border-blue-400/30">
-                Official Integration
+                Official Govt APIs
               </span>
-              <span className="text-xs text-blue-200">NDMA · ASI · SDMA · Coastal · Forest</span>
+              <span className="text-xs text-blue-200">INCOIS · data.gov.in · MoES · CPCB</span>
             </div>
-            <h2 className="text-lg font-bold">Government Hazard & Restricted Zone Databases</h2>
+            <h2 className="text-lg font-bold">Fetch Live Official Indian Government Geofences</h2>
             <p className="text-xs text-blue-100 max-w-2xl leading-relaxed">
-              Synchronize live disaster warning corridors (landslides, flash-floods), protected national heritage
-              conservation perimeters, and active wildlife crossing safety buffers directly from official government databases.
+              Connect directly to official Government of India APIs to automatically retrieve and create safety hazard
+              geofences in Firestore as per government sources.
             </p>
           </div>
+        </div>
 
-          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
+        {/* API Selector & Configuration */}
+        <div className="bg-blue-950/60 border border-blue-400/30 rounded-xl p-4 space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {GOV_API_PROVIDERS.map((provider) => {
+              const isSelected = selectedProvider === provider.id
+              return (
+                <div
+                  key={provider.id}
+                  onClick={() => setSelectedProvider(provider.id)}
+                  className={`p-3 rounded-xl border cursor-pointer transition flex flex-col justify-between ${
+                    isSelected
+                      ? 'bg-blue-600/30 border-blue-400 text-white shadow-md'
+                      : 'bg-blue-900/30 border-blue-800/60 text-blue-200 hover:bg-blue-800/30'
+                  }`}
+                >
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <p className="font-semibold text-xs text-white">{provider.agency}</p>
+                      {isSelected && <span className="text-blue-300 text-xs">✓ Selected</span>}
+                    </div>
+                    <p className="text-[11px] text-blue-200 mt-1 line-clamp-2">{provider.description}</p>
+                  </div>
+                  <span className="text-[10px] text-blue-300 font-mono mt-2 block">
+                    {provider.requiresKey ? 'Requires API Key' : 'Open Govt API'}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+
+          {/* Conditional Input Fields */}
+          {currentProviderConfig?.requiresKey && (
+            <div className="pt-2">
+              <label className="text-xs font-medium text-blue-200 block mb-1">
+                data.gov.in API Key
+              </label>
+              <input
+                type="password"
+                placeholder="Enter your registered data.gov.in API key..."
+                value={govApiKey}
+                onChange={(e) => setGovApiKey(e.target.value)}
+                className="w-full bg-blue-900/40 border border-blue-400/40 rounded-lg px-3 py-2 text-xs text-white placeholder-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-400 font-mono"
+              />
+              <p className="text-[10px] text-blue-300 mt-1">
+                Obtain a free API key by registering at <a href="https://data.gov.in" target="_blank" rel="noreferrer" className="underline text-blue-200">data.gov.in</a>.
+              </p>
+            </div>
+          )}
+
+          {selectedProvider === 'CUSTOM_GOV_API' && (
+            <div className="pt-2">
+              <label className="text-xs font-medium text-blue-200 block mb-1">
+                Government Disaster / Hazard Feed URL (GeoJSON / REST)
+              </label>
+              <input
+                type="url"
+                placeholder="https://api.disaster.gov.in/... or https://sachet.ndma.gov.in/..."
+                value={customGovUrl}
+                onChange={(e) => setCustomGovUrl(e.target.value)}
+                className="w-full bg-blue-900/40 border border-blue-400/40 rounded-lg px-3 py-2 text-xs text-white placeholder-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-400 font-mono"
+              />
+            </div>
+          )}
+
+          <div className="pt-2 flex items-center justify-between flex-wrap gap-3">
+            <span className="text-xs text-blue-200">
+              Active Source: <strong>{currentProviderConfig?.name}</strong>
+            </span>
             <button
               onClick={handleSyncGovernment}
               disabled={syncing}
-              className="bg-white hover:bg-blue-50 text-blue-900 font-semibold px-5 py-2.5 rounded-xl text-sm shadow transition flex items-center gap-2 disabled:opacity-50 whitespace-nowrap cursor-pointer"
+              className="bg-white hover:bg-blue-50 text-blue-900 font-bold px-6 py-2.5 rounded-xl text-sm shadow transition flex items-center gap-2 disabled:opacity-50 cursor-pointer"
             >
               {syncing ? (
                 <>
@@ -153,14 +243,14 @@ function AdminGeofences() {
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                   </svg>
-                  Syncing API...
+                  Connecting to Govt API...
                 </>
               ) : (
                 <>
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-blue-700">
                     <path fillRule="evenodd" d="M15.312 11.424a5.5 5.5 0 01-9.201 2.466l-.312-.311h2.433a.75.75 0 000-1.5H3.75A.75.75 0 003 12.828v4.479a.75.75 0 001.5 0v-2.18l.432.432a7 7 0 0011.758-3.155.75.75 0 00-1.378-.58zM4.688 8.576a5.5 5.5 0 019.201-2.466l.312.311H11.768a.75.75 0 000 1.5h4.482A.75.75 0 0017 7.172V2.693a.75.75 0 00-1.5 0v2.18l-.432-.432A7 7 0 003.31 7.596a.75.75 0 001.378.58z" clipRule="evenodd" />
                   </svg>
-                  Sync Government API Zones
+                  Fetch & Auto-Create Geofences
                 </>
               )}
             </button>
@@ -168,11 +258,10 @@ function AdminGeofences() {
         </div>
 
         {syncResult && (
-          <div className="mt-4 p-3 bg-blue-950/60 border border-blue-400/40 rounded-xl text-xs flex items-center justify-between flex-wrap gap-2 text-blue-100">
+          <div className="p-3 bg-blue-950/80 border border-green-400/50 rounded-xl text-xs flex items-center justify-between flex-wrap gap-2 text-green-200">
             <span>
-              ✓ Synchronized successfully: <strong>{syncResult.addedCount} new zones added</strong>,{' '}
-              <strong>{syncResult.skippedCount} existing zones up to date</strong>. Source:{' '}
-              <span className="font-mono">{syncResult.source}</span>.
+              ✓ Connected to <strong>{syncResult.provider}</strong>: <strong>{syncResult.addedCount} new government geofences created</strong>,{' '}
+              <strong>{syncResult.skippedCount} up-to-date</strong> ({syncResult.count} total records fetched).
             </span>
             <button
               onClick={() => setSyncResult(null)}
@@ -180,6 +269,12 @@ function AdminGeofences() {
             >
               Dismiss
             </button>
+          </div>
+        )}
+
+        {error && (
+          <div className="p-3 bg-red-950/80 border border-red-400/50 rounded-xl text-xs text-red-200">
+            {error}
           </div>
         )}
       </div>
@@ -199,7 +294,7 @@ function AdminGeofences() {
             <label className="text-xs font-medium text-gray-600">Name</label>
             <input
               name="name"
-              placeholder="e.g. Dangerous Cliff Edge / Construction Perimeter"
+              placeholder="e.g. Hazardous River Bend / Landslide Clearing"
               value={form.name}
               onChange={handleChange}
               required
@@ -287,7 +382,6 @@ function AdminGeofences() {
               </button>
             )}
           </div>
-          {error && <p className="sm:col-span-3 text-red-600 text-xs font-medium">{error}</p>}
         </form>
       </div>
 
@@ -333,7 +427,7 @@ function AdminGeofences() {
             <thead className="bg-gray-50 text-left text-gray-500 border-b">
               <tr>
                 <th className="p-3">Zone Details</th>
-                <th className="p-3">Source</th>
+                <th className="p-3">Source & Agency</th>
                 <th className="p-3">Risk Level</th>
                 <th className="p-3">Radius</th>
                 <th className="p-3">Status</th>
@@ -344,7 +438,7 @@ function AdminGeofences() {
               {filteredGeofences.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="p-6 text-center text-gray-500">
-                    No geofences found matching the current filter.
+                    No geofences found matching the current filter. Click "Fetch & Auto-Create Geofences" above to import from official Government APIs.
                   </td>
                 </tr>
               ) : (
@@ -365,7 +459,7 @@ function AdminGeofences() {
                         {isGov ? (
                           <span className="text-[11px] font-semibold px-2 py-0.5 rounded-md bg-indigo-100 text-indigo-800 flex items-center gap-1 w-fit">
                             <span className="w-1.5 h-1.5 rounded-full bg-indigo-600"></span>
-                            Govt ({geofence.agency || 'NDMA'})
+                            {geofence.agency || 'Govt API'}
                           </span>
                         ) : (
                           <span className="text-[11px] font-semibold px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 w-fit">

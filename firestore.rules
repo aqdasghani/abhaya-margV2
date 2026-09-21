@@ -1,0 +1,209 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.role == 'admin' ||
+        request.auth.token.admin == true ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         getUserData().role == 'admin')
+      );
+    }
+
+    function isValidLatitude(lat) {
+      return lat is number && lat >= -90.0 && lat <= 90.0;
+    }
+
+    function isValidLongitude(lng) {
+      return lng is number && lng >= -180.0 && lng <= 180.0;
+    }
+
+    // ===============================================================
+    // 1. Users Collection
+    // ===============================================================
+    match /users/{uid} {
+      // User can read their own profile, admin can read any profile
+      allow get: if isOwner(uid) || isAdmin();
+      allow list: if isAdmin();
+
+      // Allows registration with designated role ('tourist' or 'admin')
+      allow create: if isOwner(uid) &&
+        request.resource.data.role in ['tourist', 'admin'] &&
+        request.resource.data.email is string;
+
+      // Only admins can promote or modify roles; tourists can update their own displayName
+      // but cannot alter their role field.
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        (isOwner(uid) && request.resource.data.role == resource.data.role)
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // ===============================================================
+    // 2. Tourists Collection
+    // ===============================================================
+    match /tourists/{uid} {
+      // Allow individual document lookup for emergency QR verification by responders,
+      // or owner / admin
+      allow get: if true;
+
+      // Only admins can list or query the entire tourists database
+      allow list: if isAdmin();
+
+      // Only the authenticated owner can create their tourist profile during registration
+      allow create: if isOwner(uid) &&
+        request.resource.data.status == 'ACTIVE' &&
+        request.resource.data.touristId is string &&
+        request.resource.data.fullName is string &&
+        request.resource.data.phone is string;
+
+      // Tourists can only update their own phone and emergency contact details;
+      // they CANNOT change touristId, status, lostAt, foundAt, or createdAt.
+      // Admins can update status (e.g. mark LOST or ACTIVE) and administrative timestamps.
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          isOwner(uid) &&
+          request.resource.data.touristId == resource.data.touristId &&
+          request.resource.data.status == resource.data.status &&
+          (!('lostAt' in request.resource.data) || request.resource.data.lostAt == resource.data.lostAt) &&
+          (!('foundAt' in request.resource.data) || request.resource.data.foundAt == resource.data.foundAt) &&
+          request.resource.data.createdAt == resource.data.createdAt
+        )
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // ===============================================================
+    // 3. Locations Collection & History Subcollection
+    // ===============================================================
+    match /locations/{uid} {
+      // Latest location summary document
+      allow get: if isOwner(uid) || isAdmin();
+      allow list: if isAdmin();
+
+      allow write: if isOwner(uid) &&
+        isValidLatitude(request.resource.data.latitude) &&
+        isValidLongitude(request.resource.data.longitude) &&
+        (request.resource.data.accuracy == null || (request.resource.data.accuracy is number && request.resource.data.accuracy >= 0)) &&
+        request.resource.data.source in ['GPS', 'NETWORK'];
+
+      // Location readings subcollection (historical tracking points)
+      match /readings/{readingId} {
+        allow read: if isOwner(uid) || isAdmin();
+
+        allow create: if isOwner(uid) &&
+          isValidLatitude(request.resource.data.latitude) &&
+          isValidLongitude(request.resource.data.longitude) &&
+          (request.resource.data.accuracy == null || (request.resource.data.accuracy is number && request.resource.data.accuracy >= 0)) &&
+          request.resource.data.source in ['GPS', 'NETWORK'];
+
+        allow update, delete: if isAdmin();
+      }
+    }
+
+    // ===============================================================
+    // 4. Incidents Collection (SOS, LOST, GEOFENCE)
+    // ===============================================================
+    match /incidents/{incidentId} {
+      // Tourists can only read their own incidents; admins can read all incidents
+      allow read: if isAuthenticated() && (resource.data.uid == request.auth.uid || isAdmin());
+
+      // Authenticated tourists can create SOS and GEOFENCE incidents for their own account;
+      // Admins can create incidents (such as LOST incidents).
+      allow create: if isAuthenticated() && (
+        (
+          request.resource.data.uid == request.auth.uid &&
+          request.resource.data.status == 'ACTIVE' &&
+          request.resource.data.incidentType in ['SOS', 'GEOFENCE', 'MEDICAL', 'HAZARD']
+        ) ||
+        (
+          isAdmin() &&
+          request.resource.data.incidentType in ['SOS', 'LOST', 'GEOFENCE', 'MEDICAL', 'HAZARD']
+        )
+      ) &&
+
+      (request.resource.data.latitude == null || isValidLatitude(request.resource.data.latitude)) &&
+      (request.resource.data.longitude == null || isValidLongitude(request.resource.data.longitude));
+
+      // Tourists cannot mark incidents as RESOLVED or tamper with incident records.
+      // Only admins can update status to RESOLVED and set resolvedAt.
+      allow update: if isAdmin() &&
+        request.resource.data.incidentType == resource.data.incidentType &&
+        request.resource.data.uid == resource.data.uid &&
+        request.resource.data.createdAt == resource.data.createdAt;
+
+      allow delete: if isAdmin();
+    }
+
+    // ===============================================================
+    // 5. Geofences Collection
+    // ===============================================================
+    match /geofences/{geofenceId} {
+      // Any authenticated tourist can read geofences to display safe/restricted zones on map
+      allow read: if isAuthenticated();
+
+      // Only administrators can create, edit, or toggle geofence zones with strict validation
+      allow write: if isAdmin() &&
+        request.resource.data.name is string &&
+        isValidLatitude(request.resource.data.latitude) &&
+        isValidLongitude(request.resource.data.longitude) &&
+        request.resource.data.radius is number &&
+        request.resource.data.radius > 0 &&
+        request.resource.data.radius <= 100000 &&
+        request.resource.data.riskLevel in ['LOW', 'MEDIUM', 'HIGH'] &&
+        request.resource.data.active is bool;
+    }
+
+    // ===============================================================
+    // 6. Sequential Counters (touristId, incidentId)
+    // ===============================================================
+    match /counters/{counterId} {
+      // Authenticated users can read the counter
+      allow read: if isAuthenticated() && counterId in ['touristId', 'incidentId'];
+
+      // Creation: must initialize lastNumber to 1
+      allow create: if isAuthenticated() && counterId in ['touristId', 'incidentId'] &&
+        request.resource.data.year is int &&
+        request.resource.data.lastNumber == 1;
+
+      // Update: strictly prevents number jumps, resets, negative values, and tampering.
+      // Can only increment lastNumber by exactly 1 for the same year, or reset to 1 on year rollover.
+      allow update: if isAuthenticated() && counterId in ['touristId', 'incidentId'] &&
+        request.resource.data.year is int &&
+        (
+          (
+            request.resource.data.year == resource.data.year &&
+            request.resource.data.lastNumber == resource.data.lastNumber + 1
+          ) ||
+          (
+            request.resource.data.year > resource.data.year &&
+            request.resource.data.lastNumber == 1
+          )
+        );
+
+      allow delete: if false;
+    }
+  }
+}

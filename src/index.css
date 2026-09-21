@@ -1,0 +1,5 @@
+@import "tailwindcss";
+
+.marker-last-known {
+  filter: grayscale(70%) opacity(0.85);
+}
